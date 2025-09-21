@@ -1,0 +1,27 @@
+# Core FastAPI and web server
+fastapi
+uvicorn[standard]
+python-multipart
+
+# HTTP client and image processing
+httpx
+Pillow
+
+# Data validation and processing
+pydantic
+pandas
+
+# NLP and text processing
+spacy
+word2number
+
+# USDA API integration
+requests
+
+# Optional: Remove if causing issues
+# PyYAML  # Only needed if you use render.yaml
+
+# Development/Testing (optional)
+# pytest
+# python-jose[cryptography]
+# passlib[bcrypt]
