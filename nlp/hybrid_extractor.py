@@ -1,17 +1,15 @@
 from .rules import rule_based_extraction
 from .spacy_model import load_trained_model
 from difflib import SequenceMatcher
-import re  # Added missing import
+import re  
 
-nlp_model = load_trained_model()  # loads or returns None
+nlp_model = load_trained_model()  
 
 def spacy_extract(nlp, text):
-    """Extract food entities using spaCy model"""
     try:
         doc = nlp(text)
         results = []
         
-        # Extract entities labeled as "FOOD"
         for ent in doc.ents:
             if ent.label_ == "FOOD":
                 food_name = ent.text.lower().strip()
