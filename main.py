@@ -43,7 +43,7 @@ app.add_middleware(
 # =============================================================================
 
 # LogMeal API Configuration
-LOGMEAL_API_TOKEN = os.getenv('LOGMEAL_TOKEN', '4910ae35cb03932b4be6bb6e5dbb798bef3a78ff')
+LOGMEAL_API_TOKEN = os.getenv('LOGMEAL_TOKEN', '01837cb41c6d9314170d28d15b3103a9e89d0987')
 LOGMEAL_BASE_URL = 'https://api.logmeal.es'
 
 # USDA API Configuration  
