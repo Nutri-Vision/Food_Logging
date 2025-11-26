@@ -1,11 +1,17 @@
-from .rules import rule_based_extraction
+from .rules import rule_based_extraction, identify_food, is_likely_food
 from .spacy_model import load_trained_model
 from difflib import SequenceMatcher
-import re  
+import re
 
-nlp_model = load_trained_model()  
+# Load spaCy model if available
+nlp_model = load_trained_model()
+
+# ============================================================================
+# SPACY EXTRACTION
+# ============================================================================
 
 def spacy_extract(nlp, text):
+    """Extract food entities using spaCy NER"""
     try:
         doc = nlp(text)
         results = []
@@ -14,7 +20,9 @@ def spacy_extract(nlp, text):
             if ent.label_ == "FOOD":
                 food_name = ent.text.lower().strip()
                 if food_name and len(food_name) > 1:
-                    results.append(food_name)
+                    # Skip if it's just a number or unit
+                    if not re.match(r'^\d+', food_name):
+                        results.append(food_name)
         
         # Remove duplicates while preserving order
         seen = set()
@@ -30,25 +38,41 @@ def spacy_extract(nlp, text):
         print(f"spaCy extraction error: {e}")
         return []
 
+# ============================================================================
+# INTELLIGENT MERGING OF EXTRACTIONS
+# ============================================================================
+
 def merge_extractions(rule_items, spacy_foods):
-    """Merge rule-based and spaCy extractions intelligently"""
+    """Intelligently merge rule-based and spaCy extractions"""
     if not spacy_foods:
         return rule_items
     
-    # Clean spaCy foods - remove non-food items and numbers
+    # Clean spaCy foods - remove non-food items
     clean_spacy_foods = []
     for food in spacy_foods:
         food = food.strip().lower()
+        
         # Skip if it's just a number, unit, or common non-food word
-        if (re.match(r'^\d+.*', food) or 
-            food in ['cups', 'slices', 'glass', 'bowl', 'tbsp', 'tsp'] or
+        skip_words = [
+            'cups', 'cup', 'slices', 'slice', 'glass', 'glasses',
+            'bowl', 'bowls', 'plate', 'plates', 'tbsp', 'tsp',
+            'grams', 'gram', 'ounces', 'ounce', 'serving', 'servings',
+            'breakfast', 'lunch', 'dinner', 'meal', 'snack'
+        ]
+        
+        if (re.match(r'^\d+', food) or 
+            food in skip_words or 
             len(food) < 3):
             continue
-        clean_spacy_foods.append(food)
+        
+        # Check if it's likely a food
+        if is_likely_food(food):
+            clean_spacy_foods.append(food)
     
     merged_items = []
     used_spacy_foods = set()
     
+    # Match rule-based items with spaCy foods
     for rule_item in rule_items:
         rule_ingredient = rule_item["ingredient"].lower()
         best_match = None
@@ -58,25 +82,29 @@ def merge_extractions(rule_items, spacy_foods):
         for spacy_food in clean_spacy_foods:
             if spacy_food in used_spacy_foods:
                 continue
-                
-            # Check for exact or substring matches
+            
+            # Calculate similarity score
             if spacy_food == rule_ingredient:
                 score = 1.0  # Perfect match
             elif spacy_food in rule_ingredient:
                 score = 0.9  # SpaCy food is contained in rule ingredient
             elif rule_ingredient in spacy_food:
-                score = 0.8  # Rule ingredient is contained in spaCy food
+                score = 0.85  # Rule ingredient is contained in spaCy food
             else:
                 # Use sequence matching for similarity
                 score = SequenceMatcher(None, rule_ingredient, spacy_food).ratio()
             
-            if score > best_score and score > 0.7:  # Higher threshold
+            if score > best_score and score > 0.75:  # Threshold for matching
                 best_match = spacy_food
                 best_score = score
         
-        # Use spaCy match if found and it's a good match
-        if best_match and best_score > 0.7:
-            final_ingredient = best_match
+        # Use spaCy match if it's a good match, otherwise use rule-based
+        if best_match and best_score > 0.75:
+            # Use the more specific/complete name
+            if len(best_match) > len(rule_ingredient):
+                final_ingredient = identify_food(best_match)
+            else:
+                final_ingredient = rule_ingredient
             used_spacy_foods.add(best_match)
         else:
             final_ingredient = rule_ingredient
@@ -87,24 +115,26 @@ def merge_extractions(rule_items, spacy_foods):
             "unit": rule_item["unit"]
         })
     
-    # Add any high-quality spaCy foods that weren't matched
+    # Add any unused high-quality spaCy foods that weren't matched
     for spacy_food in clean_spacy_foods:
         if spacy_food not in used_spacy_foods:
             # Only add if it's clearly a food item
-            food_keywords = ['chicken', 'beef', 'pork', 'fish', 'salmon', 'tuna', 'rice', 'bread', 'pasta', 
-                           'apple', 'banana', 'orange', 'milk', 'cheese', 'egg', 'potato', 'tomato', 
-                           'broccoli', 'spinach', 'carrot', 'yogurt', 'oats', 'quinoa']
+            identified_food = identify_food(spacy_food)
             
-            is_clear_food = any(keyword in spacy_food for keyword in food_keywords)
-            
-            if is_clear_food or len(spacy_food) >= 4:  # Longer words more likely to be real foods
+            # Skip if it's generic or already exists
+            if identified_food != spacy_food.lower():
+                # It was recognized as a known food
                 merged_items.append({
-                    "ingredient": spacy_food,
+                    "ingredient": identified_food,
                     "quantity": 1.0,
                     "unit": "serving"
                 })
     
     return merged_items
+
+# ============================================================================
+# CONSOLIDATION
+# ============================================================================
 
 def consolidate_items(items):
     """Consolidate duplicate ingredients by summing quantities"""
@@ -118,51 +148,84 @@ def consolidate_items(items):
         quantity = item.get("quantity", 1.0)
         unit = item.get("unit", "serving")
         
-        if ingredient in consolidated:
-            # If same unit, add quantities; otherwise, keep separate entries
-            existing_unit = consolidated[ingredient]["unit"]
-            if existing_unit == unit:
-                consolidated[ingredient]["quantity"] += quantity
-            else:
-                # Create a new key for different units
-                key = f"{ingredient}_{unit}"
-                consolidated[key] = {
-                    "ingredient": ingredient,
-                    "quantity": quantity,
-                    "unit": unit
-                }
+        # Create key combining ingredient and unit
+        key = f"{ingredient}|{unit}"
+        
+        if key in consolidated:
+            # Same ingredient and unit - sum quantities
+            consolidated[key]["quantity"] += quantity
         else:
-            consolidated[ingredient] = {
+            consolidated[key] = {
                 "ingredient": ingredient,
-                "quantity": round(quantity, 2),
+                "quantity": quantity,
                 "unit": unit
             }
     
-    # Convert back to list and clean up keys that were modified for different units
+    # Convert back to list and round quantities
     result = []
     for item in consolidated.values():
+        item["quantity"] = round(item["quantity"], 2)
         result.append(item)
     
     return result
 
+# ============================================================================
+# POST-PROCESSING VALIDATION
+# ============================================================================
+
+def validate_and_filter(items):
+    """Validate and filter extracted items"""
+    valid_items = []
+    
+    for item in items:
+        ingredient = item["ingredient"]
+        quantity = item["quantity"]
+        
+        # Skip if ingredient is too generic or invalid
+        generic_terms = [
+            "food", "item", "thing", "stuff", "meal",
+            "breakfast", "lunch", "dinner", "snack"
+        ]
+        
+        if ingredient.lower() in generic_terms:
+            continue
+        
+        # Skip if quantity is unreasonable
+        if quantity <= 0 or quantity > 100:
+            continue
+        
+        # Skip if ingredient is just a number
+        if re.match(r'^\d+$', ingredient):
+            continue
+        
+        valid_items.append(item)
+    
+    return valid_items
+
+# ============================================================================
+# MAIN HYBRID EXTRACTION
+# ============================================================================
+
 def hybrid_extract(text):
     """
-    Main extraction function that combines rule-based and spaCy approaches
+    Main extraction function combining rule-based and spaCy approaches
+    with enhanced accuracy and validation
     """
     if not text or not text.strip():
         return []
     
-    # Step 1: Always run rule-based extraction (provides quantities and units)
+    # Step 1: Run rule-based extraction (provides quantities and units)
     rule_items = rule_based_extraction(text)
     
-    # Step 2: If spaCy model is available, use it to enhance ingredient names
+    # Step 2: If spaCy model is available, use it to enhance extraction
     spacy_foods = []
     if nlp_model:
         try:
             spacy_foods = spacy_extract(nlp_model, text)
-            print(f"SpaCy extracted: {spacy_foods}")  # Debug output
+            if spacy_foods:
+                print(f"[DEBUG] SpaCy extracted: {spacy_foods}")
         except Exception as e:
-            print(f"SpaCy model error: {e}")
+            print(f"[DEBUG] SpaCy model error: {e}")
             spacy_foods = []
     
     # Step 3: Merge the extractions
@@ -172,27 +235,62 @@ def hybrid_extract(text):
         merged_items = rule_items
     
     # Step 4: Consolidate duplicate ingredients
-    final_items = consolidate_items(merged_items)
+    consolidated_items = consolidate_items(merged_items)
+    
+    # Step 5: Validate and filter
+    final_items = validate_and_filter(consolidated_items)
     
     # Debug output
-    print(f"Rule-based extracted: {rule_items}")
-    print(f"Final items: {final_items}")
+    print(f"[DEBUG] Rule-based: {len(rule_items)} items")
+    print(f"[DEBUG] After merge: {len(merged_items)} items")
+    print(f"[DEBUG] After consolidation: {len(consolidated_items)} items")
+    print(f"[DEBUG] Final valid: {len(final_items)} items")
+    print(f"[DEBUG] Final items: {final_items}")
     
     return final_items
 
-# Additional utility function for testing
+# ============================================================================
+# TESTING UTILITY
+# ============================================================================
+
 def test_hybrid_extract(test_cases):
-    """Test function for hybrid extraction"""
-    print("=== Hybrid Extraction Test Results ===")
+    """Test function for hybrid extraction with detailed output"""
+    print("\n" + "="*70)
+    print("HYBRID EXTRACTION TEST RESULTS")
+    print("="*70)
     
     for i, test_text in enumerate(test_cases, 1):
-        print(f"\nTest {i}: '{test_text}'")
+        print(f"\n[Test {i}] Input: '{test_text}'")
+        print("-" * 70)
+        
         result = hybrid_extract(test_text)
         
         if result:
+            print(f"Found {len(result)} item(s):")
             for item in result:
-                print(f"  - {item['quantity']} {item['unit']} of {item['ingredient']}")
+                print(f"  ✓ {item['quantity']} {item['unit']} of {item['ingredient']}")
         else:
-            print("  - No items extracted")
+            print("  ✗ No items extracted")
     
-    print("\n" + "="*50)
+    print("\n" + "="*70)
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
+if __name__ == "__main__":
+    # Test cases
+    test_cases = [
+        "I had 2 slices of whole wheat bread and 3 eggs",
+        "200g grilled chicken, 1 cup brown rice, and steamed broccoli",
+        "apple, banana, and orange for breakfast",
+        "Pizza 2 slices with a small salad",
+        "1 1/2 cups of oatmeal with half banana",
+        "Salmon fillet 150g, quinoa 1 cup, and asparagus",
+        "chicken breast, rice, and vegetables",
+        "3 scrambled eggs, 2 slices toast, glass of milk",
+        "Grilled chicken sandwich with fries",
+        "Bowl of pasta with meatballs"
+    ]
+    
+    test_hybrid_extract(test_cases)
