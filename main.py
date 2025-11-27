@@ -145,34 +145,52 @@ async def get_usda_nutrition(food_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 def extract_usda_macros(usda_food: Dict[str, Any]) -> MacroInfo:
-    """Extract macronutrients from USDA food data"""
+    """Extract macronutrients from USDA food data - FIXED VERSION"""
     nutrients = {}
     
-    # Map USDA nutrient names to our standard names
-    nutrient_map = {
-        'Energy': 'calories',
-        'Protein': 'protein', 
-        'Carbohydrate, by difference': 'carbs',
-        'Total lipid (fat)': 'fats',
-        'Fiber, total dietary': 'fiber',
-        'Sugars, total including NLEA': 'sugar'
+    # USDA Nutrient IDs (more reliable than name matching)
+    nutrient_id_map = {
+        1008: 'calories',      # Energy (kcal)
+        1003: 'protein',       # Protein
+        1005: 'carbs',         # Carbohydrate, by difference
+        1004: 'fats',          # Total lipid (fat)
+        1079: 'fiber',         # Fiber, total dietary
+        2000: 'sugar',         # Sugars, total including NLEA (primary)
+        269: 'sugar_alt',      # Sugars, total (fallback)
     }
     
     for nutrient in usda_food.get('foodNutrients', []):
-        nutrient_name = nutrient.get('nutrient', {}).get('name', '')
+        nutrient_id = nutrient.get('nutrientId')
         
-        if nutrient_name in nutrient_map:
-            value = nutrient.get('amount', 0)
-            # Convert kcal to calories for energy
-            if nutrient_name == 'Energy':
-                unit = nutrient.get('nutrient', {}).get('unitName', '').upper()
-                if unit == 'KCAL':
-                    nutrients[nutrient_map[nutrient_name]] = float(value)
-                elif unit == 'KJ':
-                    # Convert kJ to kcal (1 kcal = 4.184 kJ)
-                    nutrients[nutrient_map[nutrient_name]] = float(value) / 4.184
+        # Handle nested nutrient format
+        if 'nutrient' in nutrient:
+            nested_nutrient = nutrient.get('nutrient', {})
+            nutrient_id = nested_nutrient.get('number') or nutrient_id
+            unit_name = nested_nutrient.get('unitName', '').upper()
+        else:
+            unit_name = nutrient.get('unitName', '').upper()
+        
+        # Get value (handle both 'amount' and 'value' fields)
+        value = nutrient.get('amount') or nutrient.get('value', 0)
+        
+        if nutrient_id in nutrient_id_map:
+            key = nutrient_id_map[nutrient_id]
+            
+            if nutrient_id == 1008:  # Calories
+                if unit_name == 'KJ':
+                    nutrients['calories'] = float(value) / 4.184
+                else:
+                    nutrients['calories'] = float(value)
+            elif key == 'sugar':
+                nutrients['sugar'] = float(value)
+            elif key == 'sugar_alt' and 'sugar' not in nutrients:
+                nutrients['sugar'] = float(value)
             else:
-                nutrients[nutrient_map[nutrient_name]] = float(value)
+                nutrients[key] = float(value)
+    
+    # Fallback: estimate sugar from carbs if not found
+    if 'sugar' not in nutrients and 'carbs' in nutrients and nutrients['carbs'] > 0:
+        nutrients['sugar'] = nutrients['carbs'] * 0.4  # rough estimate
     
     return MacroInfo(
         calories=nutrients.get('calories', 0.0),
