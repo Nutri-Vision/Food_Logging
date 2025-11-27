@@ -144,53 +144,153 @@ async def get_usda_nutrition(food_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"USDA nutrition error: {str(e)}")
         return None
 
-def extract_usda_macros(usda_food: Dict[str, Any]) -> MacroInfo:
-    """Extract macronutrients from USDA food data - FIXED VERSION"""
-    nutrients = {}
+def estimate_sugar_from_food_type(food_description: str, carbs: float) -> float:
+    """Estimate sugar content based on food type and carbs"""
+    food_lower = food_description.lower()
     
-    # USDA Nutrient IDs (more reliable than name matching)
-    nutrient_id_map = {
-        1008: 'calories',      # Energy (kcal)
-        1003: 'protein',       # Protein
-        1005: 'carbs',         # Carbohydrate, by difference
-        1004: 'fats',          # Total lipid (fat)
-        1079: 'fiber',         # Fiber, total dietary
-        2000: 'sugar',         # Sugars, total including NLEA (primary)
-        269: 'sugar_alt',      # Sugars, total (fallback)
-    }
+    high_sugar_keywords = ['apple', 'banana', 'orange', 'strawberry', 'grape', 'mango', 
+                          'pineapple', 'watermelon', 'berry', 'fruit', 'candy', 'chocolate', 
+                          'cake', 'cookie', 'dessert', 'ice cream', 'soda', 'juice', 'honey',
+                          'syrup', 'jam', 'jelly', 'sweet']
+    
+    medium_sugar_keywords = ['carrot', 'tomato', 'beet', 'milk', 'yogurt', 'corn',
+                            'peas', 'onion', 'squash']
+    
+    low_sugar_keywords = ['rice', 'bread', 'pasta', 'oat', 'wheat', 'cereal', 
+                         'bean', 'lentil', 'quinoa', 'barley']
+    
+    minimal_sugar_keywords = ['chicken', 'beef', 'pork', 'fish', 'egg', 'meat',
+                             'oil', 'butter', 'cheese', 'bacon']
+    
+    for keyword in high_sugar_keywords:
+        if keyword in food_lower:
+            return round(carbs * 0.70, 1)
+    
+    for keyword in medium_sugar_keywords:
+        if keyword in food_lower:
+            return round(carbs * 0.30, 1)
+    
+    for keyword in low_sugar_keywords:
+        if keyword in food_lower:
+            return round(carbs * 0.08, 1)
+    
+    for keyword in minimal_sugar_keywords:
+        if keyword in food_lower:
+            return round(carbs * 0.02, 1) if carbs > 0 else 0.5
+    
+    return round(carbs * 0.20, 1) if carbs > 0 else 1.0
+
+def extract_usda_macros(usda_food: Dict[str, Any]) -> MacroInfo:
+    """
+    Extract macronutrients from USDA food data - FIXED VERSION
+    Handles all USDA API response formats and ensures all values are extracted
+    """
+    nutrients = {}
+    food_description = usda_food.get('description', '')
+    
+    logger.debug(f"Extracting macros for: {food_description}")
+    logger.debug(f"Total nutrients in response: {len(usda_food.get('foodNutrients', []))}")
+    
+    sugar_found = False
     
     for nutrient in usda_food.get('foodNutrients', []):
-        nutrient_id = nutrient.get('nutrientId')
+        nutrient_id = None
+        value = 0
+        unit_name = ''
+        nutrient_name = ''
         
-        # Handle nested nutrient format
+        # Handle multiple USDA response formats
         if 'nutrient' in nutrient:
+            # Format 1: Nested nutrient object (common in detailed food endpoint)
             nested_nutrient = nutrient.get('nutrient', {})
-            nutrient_id = nested_nutrient.get('number') or nutrient_id
+            nutrient_id = nested_nutrient.get('number') or nested_nutrient.get('id')
+            nutrient_name = nested_nutrient.get('name', '').lower()
             unit_name = nested_nutrient.get('unitName', '').upper()
+            value = nutrient.get('amount', 0)
         else:
+            # Format 2: Flat structure (common in search results)
+            nutrient_id = nutrient.get('nutrientId') or nutrient.get('nutrientNumber')
+            nutrient_name = nutrient.get('nutrientName', '').lower()
             unit_name = nutrient.get('unitName', '').upper()
+            value = nutrient.get('value', 0) or nutrient.get('amount', 0)
         
-        # Get value (handle both 'amount' and 'value' fields)
-        value = nutrient.get('amount') or nutrient.get('value', 0)
+        # Convert value to float safely
+        try:
+            value = float(value) if value else 0.0
+        except (ValueError, TypeError):
+            value = 0.0
         
-        if nutrient_id in nutrient_id_map:
-            key = nutrient_id_map[nutrient_id]
-            
-            if nutrient_id == 1008:  # Calories
-                if unit_name == 'KJ':
-                    nutrients['calories'] = float(value) / 4.184
-                else:
-                    nutrients['calories'] = float(value)
-            elif key == 'sugar':
-                nutrients['sugar'] = float(value)
-            elif key == 'sugar_alt' and 'sugar' not in nutrients:
-                nutrients['sugar'] = float(value)
+        # Skip if no value
+        if value == 0:
+            continue
+        
+        # Map by nutrient ID (most reliable)
+        if nutrient_id == 1008:  # Energy
+            if unit_name == 'KJ':
+                nutrients['calories'] = value / 4.184
             else:
-                nutrients[key] = float(value)
+                nutrients['calories'] = value
+            logger.debug(f"Found calories: {nutrients['calories']}")
+        
+        elif nutrient_id == 1003:  # Protein
+            nutrients['protein'] = value
+            logger.debug(f"Found protein: {value}g")
+        
+        elif nutrient_id == 1005:  # Carbohydrate, by difference
+            nutrients['carbs'] = value
+            logger.debug(f"Found carbs: {value}g")
+        
+        elif nutrient_id == 1004:  # Total lipid (fat)
+            nutrients['fats'] = value
+            logger.debug(f"Found fats: {value}g")
+        
+        elif nutrient_id == 1079:  # Fiber, total dietary
+            nutrients['fiber'] = value
+            logger.debug(f"Found fiber: {value}g")
+        
+        elif nutrient_id == 2000:  # Sugars, total including NLEA (primary)
+            nutrients['sugar'] = value
+            sugar_found = True
+            logger.debug(f"Found sugar (ID 2000): {value}g")
+        
+        elif nutrient_id == 269 and not sugar_found:  # Sugars, total (fallback)
+            nutrients['sugar'] = value
+            sugar_found = True
+            logger.debug(f"Found sugar (ID 269): {value}g")
+        
+        # Fallback to name matching if ID didn't match
+        elif not nutrient_id or nutrient_id not in [1008, 1003, 1005, 1004, 1079, 2000, 269]:
+            if 'energy' in nutrient_name and 'calories' not in nutrients:
+                if 'kj' in unit_name.lower():
+                    nutrients['calories'] = value / 4.184
+                else:
+                    nutrients['calories'] = value
+            elif 'protein' in nutrient_name and 'protein' not in nutrients:
+                nutrients['protein'] = value
+            elif 'carbohydrate' in nutrient_name and 'carbs' not in nutrients:
+                nutrients['carbs'] = value
+            elif 'lipid' in nutrient_name or ('fat' in nutrient_name and 'fatty' not in nutrient_name):
+                if 'fats' not in nutrients:
+                    nutrients['fats'] = value
+            elif 'fiber' in nutrient_name and 'fiber' not in nutrients:
+                nutrients['fiber'] = value
+            elif 'sugar' in nutrient_name and not sugar_found and 'added' not in nutrient_name:
+                nutrients['sugar'] = value
+                sugar_found = True
     
-    # Fallback: estimate sugar from carbs if not found
-    if 'sugar' not in nutrients and 'carbs' in nutrients and nutrients['carbs'] > 0:
-        nutrients['sugar'] = nutrients['carbs'] * 0.4  # rough estimate
+    # CRITICAL: Estimate sugar if not found or is zero
+    if not sugar_found or nutrients.get('sugar', 0) <= 0:
+        carbs = nutrients.get('carbs', 0)
+        if carbs > 0:
+            nutrients['sugar'] = estimate_sugar_from_food_type(food_description, carbs)
+            logger.debug(f"Estimated sugar from carbs: {nutrients['sugar']}g")
+        else:
+            nutrients['sugar'] = 0.5  # Minimum fallback
+    
+    # Log what we extracted
+    logger.info(f"Extracted macros for {food_description}: calories={nutrients.get('calories', 0)}, "
+                f"protein={nutrients.get('protein', 0)}g, carbs={nutrients.get('carbs', 0)}g, "
+                f"fats={nutrients.get('fats', 0)}g, sugar={nutrients.get('sugar', 0)}g")
     
     return MacroInfo(
         calories=nutrients.get('calories', 0.0),
@@ -198,7 +298,7 @@ def extract_usda_macros(usda_food: Dict[str, Any]) -> MacroInfo:
         carbs=nutrients.get('carbs', 0.0),
         fats=nutrients.get('fats', 0.0),
         fiber=nutrients.get('fiber'),
-        sugar=nutrients.get('sugar')
+        sugar=nutrients.get('sugar', 0.5)
     )
 
 # =============================================================================
