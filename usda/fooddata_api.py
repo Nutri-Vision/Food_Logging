@@ -33,15 +33,13 @@ UNIT_TO_GRAMS = {
 }
 
 def search_food(query, limit=3):
-    """Search for foods in USDA database"""
     url = f"{USDA_BASE_URL}/foods/search"
     params = {
         "query": query,
         "pageSize": limit,
         "api_key": USDA_API_KEY,
-        # 'Survey (FNDDS)' usually has better prepared food data (pizzas, burgers)
-        # 'Foundation' is better for raw ingredients (chicken breast, egg)
-        "dataType": ["Foundation", "Survey (FNDDS)", "SR Legacy"] 
+        # 👇 STRICTLY use these. Avoid "Branded" if possible.
+        "dataType": ["Survey (FNDDS)", "Foundation", "SR Legacy"] 
     }
     
     try:
@@ -62,8 +60,10 @@ def _get_nutrient_value(nutrient_entry):
     return 0.0
 
 def extract_core_macros(food_detail):
-    """Extracts macros including Fiber and Sugar"""
-    # Initialize with 0
+    """
+    Extracts macros including Fiber and Sugar with Robust Fallbacks.
+    """
+    # Initialize with 0.0 so we never get 'null'
     macros = {
         "calories": 0.0, 
         "protein_g": 0.0, 
@@ -77,16 +77,39 @@ def extract_core_macros(food_detail):
     
     for n in nutrients:
         n_id = n.get("nutrientId")
-        val = _get_nutrient_value(n.get("value", n)) # Handle flat or nested structure
+        n_name = (n.get("nutrientName") or "").lower()
+        val = _get_nutrient_value(n.get("value", n))
 
-        # --- MACRO MAPPING ---
-        if n_id == 1008: macros["calories"] = val    # Energy (kcal)
-        elif n_id == 1003: macros["protein_g"] = val # Protein
-        elif n_id == 1005: macros["carbs_g"] = val   # Carbs
-        elif n_id == 1004: macros["fat_g"] = val     # Fat
-        elif n_id == 291:  macros["fiber_g"] = val   # Fiber (Total Dietary)
-        elif n_id == 269:  macros["sugar_g"] = val   # Sugars (Total)
-    
+        # --- CALORIES ---
+        # 1008 = Energy (kcal), 2047 = Energy (Atwater Factors), 2048 = Energy (Atwater Specific)
+        if n_id in [1008, 2047, 2048] or ("energy" in n_name and "kcal" in str(n.get("unitName", "")).lower()):
+            # We prefer ID 1008, but take others if 0
+            if macros["calories"] == 0: 
+                macros["calories"] = val
+
+        # --- PROTEIN ---
+        elif n_id == 1003 or n_name == "protein":
+             macros["protein_g"] = val
+
+        # --- FAT ---
+        elif n_id == 1004 or n_name == "total lipid (fat)":
+             macros["fat_g"] = val
+
+        # --- CARBS ---
+        elif n_id == 1005 or n_name == "carbohydrate, by difference":
+             macros["carbs_g"] = val
+
+        # --- FIBER (The Fix) ---
+        # 291 = Total Dietary Fiber
+        elif n_id == 291 or "fiber, total dietary" in n_name:
+             macros["fiber_g"] = val
+
+        # --- SUGAR (The Fix) ---
+        # 269 = Sugars, Total
+        # 2000 = Sugars, Total including NLEA
+        elif n_id in [269, 2000] or n_name == "sugars, total including nlea" or n_name == "sugars, total":
+             macros["sugar_g"] = val
+
     return macros
 
 def convert_to_grams(quantity, unit):
